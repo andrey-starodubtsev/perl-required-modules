@@ -3,8 +3,16 @@
 
 # please do following before executing this script:
 #
+# Debian/Ubuntu Linux:
+#
 # $ sudo apt-get update
 # $ sudo apt-get -y install libmodule-path-perl libperl-prereqscanner-perl apt-file
+#
+# OSX:
+#
+# $ sudo port selfupdate
+# $ sudo port upgrade outdated
+# $ sudo port -N install p5-module-path p5-perl-prereqscanner
 
 use strict;
 use warnings;
@@ -13,6 +21,7 @@ use Carp;
 use File::Next;
 use File::Spec::Functions qw( :ALL );
 use File::Temp;
+use English qw(-no_match_vars);
 
 use Module::Path 'module_path';
 use Perl::PrereqScanner;
@@ -70,63 +79,97 @@ sub file_name {
 }
 
 sub apt_name {
-    my ($perl_module) = @_;
+    my ($module) = @_;
 
-    my $apt = lc $perl_module;
+    my $apt = lc $module;
     $apt =~ s(::)(-)g;
     return "lib${apt}-perl";
 }
 
-my %modules = map { $_ => { file => file_name($_), apt => apt_name($_) } }
+sub port_name {
+    my ($module) = @_;
+
+    my $port = lc $module;
+    $port =~ s(::)(-)g;
+    return "p5-${port}";
+}
+
+my %modules = map { $_ => { file => file_name($_), apt => apt_name($_), port => port_name($_) } }
     get_missing_modules();
 
 if ( !%modules ) {
     exit 0;
 }
 
-my %apt;
+if ($OSNAME eq 'darwin') {
+    my %port;
 
-# using apt-cache
-my $re = join '|', map {"^$_->{apt}\$"} values %modules;
-my $cmd = "apt-cache search '$re'";
-for my $line (qx($cmd)) {
-    chomp $line;
-    if ( $line =~ /^(lib\S+-perl) - / ) {
-        $apt{$1} = 1;
+    my $re = join '|', map {"^$_->{port}\$"} values %modules;
+    my $cmd = "port -q search --regex '$re'";
+    for my $line (qx($cmd)) {
+        chomp $line;
+        if ( $line =~ /^(p5-\S+)$/ ) {
+            $port{$1} = 1;
 
-        while ( my ( $k, $v ) = each %modules ) {
-            if ( $line =~ /^$v->{apt}/ ) {
-                delete $modules{$k};
+            while ( my ( $k, $v ) = each %modules ) {
+                if ( $line =~ /^$v->{port}/ ) {
+                    delete $modules{$k};
+                }
             }
         }
     }
+
+    my @port = sort { $a cmp $b } keys %port;
+
+    print "# MacPorts\n";
+    print 'sudo port -N install ', join( ' ', @port ), qq(\n);
+    print qq(\n);
 }
+else {
+    my %apt;
 
-# using apt-file
-my $tmp = File::Temp->new();
-$tmp->autoflush();
-print $tmp map {"$_->{file}\n"} values %modules;
+    # using apt-cache
+    my $re = join '|', map {"^$_->{apt}\$"} values %modules;
+    my $cmd = "apt-cache search '$re'";
+    for my $line (qx($cmd)) {
+        chomp $line;
+        if ( $line =~ /^(lib\S+-perl) - / ) {
+            $apt{$1} = 1;
 
-$cmd = 'apt-file -f search ' . $tmp->filename;
-for my $line (qx($cmd)) {
-    chomp $line;
-    if ( $line =~ /^(lib\S+-perl|perl-\S+): / ) {
-        $apt{$1} = 1;
-
-        while ( my ( $k, $v ) = each %modules ) {
-            ## NB: dangerous, can match multiple packages
-            if ( $line =~ /$v->{file}$/ ) {
-                delete $modules{$k};
+            while ( my ( $k, $v ) = each %modules ) {
+                if ( $line =~ /^$v->{apt}/ ) {
+                    delete $modules{$k};
+                }
             }
         }
     }
+
+    # using apt-file
+    my $tmp = File::Temp->new();
+    $tmp->autoflush();
+    print $tmp map {"$_->{file}\n"} values %modules;
+
+    $cmd = 'apt-file -f search ' . $tmp->filename;
+    for my $line (qx($cmd)) {
+        chomp $line;
+        if ( $line =~ /^(lib\S+-perl|perl-\S+): / ) {
+            $apt{$1} = 1;
+
+            while ( my ( $k, $v ) = each %modules ) {
+                ## NB: dangerous, can match multiple packages
+                if ( $line =~ /$v->{file}$/ ) {
+                    delete $modules{$k};
+                }
+            }
+        }
+    }
+
+    my @apt = sort { $a cmp $b } keys %apt;
+
+    print "# aptitude\n";
+    print 'sudo apt-get -y install ', join( ' ', @apt ), qq(\n);
+    print qq(\n);
 }
-
-my @apt = sort { $a cmp $b } keys %apt;
-
-print "# aptitude\n";
-print 'sudo apt-get -y install ', join( ' ', @apt ), qq(\n);
-print qq(\n);
 
 print "# cpan\n";
 print 'yes | cpan -i ', join( ' ', sort { $a cmp $b } keys %modules ), qq(\n);
