@@ -19,7 +19,7 @@ use warnings;
 
 use Carp;
 use File::Next;
-use File::Spec::Functions qw( :ALL );
+use File::Spec::Functions qw(:ALL);
 use File::Temp;
 use English qw(-no_match_vars);
 
@@ -35,8 +35,8 @@ sub get_missing_modules {
     my $iter = File::Next::files(
         {
             # file_filter    => sub { /\.(pl|pm|t)$/ || !/\./ },
-            file_filter    => sub {/\.(pl|pm|t)$/},
-            descend_filter => sub { $_ ne "CVS" && $_ ne ".svn" },
+            file_filter    => sub { /\.(pl|pm|t)$/ },
+            descend_filter => sub { ! /^(CVS|\.(svn|git))$/ },
         },
         $root
     );
@@ -132,10 +132,11 @@ if ($OSNAME eq 'darwin') {
     }
 
     my @port = sort { $a cmp $b } keys %port;
-
-    print "# MacPorts\n";
-    print 'sudo port -N install ', join( ' ', @port ), qq(\n);
-    print qq(\n);
+    if (@port) {
+        print "# MacPorts\n";
+        print 'sudo port -N install ', join( ' ', @port ), qq(\n);
+        print qq(\n);
+    }
 }
 else {
     my %apt;
@@ -181,11 +182,14 @@ else {
     }
 
     my @apt = sort { $a cmp $b } keys %apt;
-
-    print "# aptitude\n";
-    print 'sudo apt-get -y install ', join( ' ', @apt ), qq(\n);
-    print qq(\n);
+    if (@apt) {
+        print "# aptitude\n";
+        print 'sudo apt-get -y install ', join( ' ', @apt ), qq(\n);
+        print qq(\n);
+    }
 }
 
-print "# cpan\n";
-print 'yes | cpan -i ', join( ' ', sort { $a cmp $b } keys %modules ), qq(\n);
+if (%modules) {
+    print "# cpan\n";
+    print 'yes | cpan -i ', join( ' ', sort { $a cmp $b } keys %modules ), qq(\n);
+}
