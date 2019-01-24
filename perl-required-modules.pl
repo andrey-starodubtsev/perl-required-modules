@@ -101,6 +101,14 @@ if ( !%modules ) {
     exit 0;
 }
 
+my $tk;
+for my $module (keys %modules) {
+    if ($module =~ '^Tk::' || $module eq 'Tk') {
+        $tk = 1;
+        delete $modules{$module};
+    }
+}
+
 if ($OSNAME eq 'darwin') {
     my %port;
 
@@ -117,6 +125,10 @@ if ($OSNAME eq 'darwin') {
                 }
             }
         }
+    }
+
+    if ($tk) {
+        $port{'p5-tk'} = 1;
     }
 
     my @port = sort { $a cmp $b } keys %port;
@@ -162,6 +174,10 @@ else {
                 }
             }
         }
+    }
+
+    if ($tk) {
+        $apt{'perl-tk'} = 1;
     }
 
     my @apt = sort { $a cmp $b } keys %apt;
