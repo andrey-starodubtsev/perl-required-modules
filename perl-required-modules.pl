@@ -16,61 +16,191 @@
 
 use strict;
 use warnings;
+use autodie ':all';
 
 use Carp;
-use File::Next;
-use File::Spec::Functions qw(:ALL);
+use English '-no_match_vars';
+use Fcntl ':flock';
+use File::Find;
+use File::HomeDir 'home';
+use File::Spec::Functions ':ALL';
 use File::Temp;
-use English qw(-no_match_vars);
+use Getopt::Long;
+use IO::Zlib;
+use LWP::Simple;
+use Pod::Usage;
+
+use Data::Dump;
 
 use Module::Path 'module_path';
 use Perl::PrereqScanner;
 
-my $scanner = Perl::PrereqScanner->new;
+my $packages = '02packages.details.txt.gz';
+my $cpan     = catfile( home(), qw(.cpan sources modules), $packages );
+my $cpanm    = catfile( home(), qw(.cpanm sources) );
+my $url      = 'https://www.cpan.org/modules/02packages.details.txt.gz';
 
-my $root = @ARGV ? $ARGV[0] : '.';
+my %o = qw(jobs 1);
+GetOptions( \%o, qw(packages-file=s jobs=i) ) or pod2usage(1);
 
-sub get_missing_modules {
-    my %local_modules;
-    my $iter = File::Next::files(
-        {
-            # file_filter    => sub { /\.(pl|pm|t)$/ || !/\./ },
-            file_filter    => sub { /\.(pl|pm|t)$/ },
-            descend_filter => sub { ! /^(CVS|\.(svn|git))$/ },
-        },
-        $root
-    );
+my $tmp = File::Temp->newdir();
 
-    my %deps;
-    while ( defined( my $file = $iter->() ) ) {
-        if ( $file =~ /\.pm$/ ) {
-            my $path = abs2rel( $file, $root );
-            $path =~ s/\.pm$//;
-            my @dirs = splitdir($path);
-            for my $i ( 0 .. $#dirs ) {
-                $local_modules{ join '::', @dirs[ $#dirs - $i .. $#dirs ] }
-                    = $file;
+my %known_packages;
+
+sub load_packages_file {
+    my ($fname) = @_;
+
+    my $found_empty_line;
+    ## open my $f, '<', $fname;
+    my $f = IO::Zlib->new($fname, 'rb');
+    while ( my $line = <$f> ) {
+        chomp $line;
+        if ($found_empty_line) {
+            ## A1z::Html 0.04 C/CE/CEEJAY/A1z-Html-0.04.tar.gz
+            my @fields = split /\s+/, $line;
+            if ( @fields != 3 ) {
+                confess "Unexpected format of line '$line'";
             }
-        }
-        eval {
-            my %required_modules = map { $_ => 1 }
-                grep { defined $_ && $_ ne 'perl' }
-                $scanner->scan_file($file)->required_modules();
+            my ( $package, $version, $path ) = @fields;
+            if ( exists $known_packages{$package} ) {
+                confess "Package '$package' is already present";
+            }
 
-            %deps = ( %deps, %required_modules );
-        };
-        if ($@) {
-            warn $@;
+            my $root = $path;
+            $root =~ s(^.+\/)();
+            $root =~ s(-[^-]+$)();
+            $root =~ s(-)(::)g;
+
+            $known_packages{$package} = {
+                version => $version,
+                path    => $path,
+                root    => $root,
+            };
+        }
+        elsif ( $line eq '' ) {
+            $found_empty_line = 1;
+        }
+    }
+    close $f;
+}
+
+if ( $o{'packages-file'} && -e $o{'packages-file'} ) {
+    load_packages_file( $o{'packages-file'} );
+}
+elsif ( -e $cpan ) {
+    load_packages_file($cpan);
+}
+elsif ( -e $cpanm ) {
+    for my $f ( glob catfile( $cpanm, '*', $packages ) ) {
+        load_packages_file($f);
+    }
+}
+else {
+    my $f = catfile( $tmp, $packages );
+    my $code = getstore( $url, $f );
+    if ( $code < 200 || 300 <= $code ) {
+        confess "Trying to download $url, got
+        $code HTTP response code";
+    }
+    load_packages_file($f);
+}
+
+my ( %deps, %local_modules );
+my $scanner = Perl::PrereqScanner->new();
+
+local $OUTPUT_AUTOFLUSH = 1;
+pipe my $in, my $out;
+my $jobs = 0;
+setpgrp;
+
+sub process_file {
+    my ($fname) = @_;
+
+    my $s;
+    {
+        open my $f, '<', $fname;
+        local $INPUT_RECORD_SEPARATOR;
+        $s = <$f>;
+        close $f;
+        for my $module ( $s =~ /\bpackage\s+([^;]*);/g ) {
+            $module =~ s/\s+//g;
+            $local_modules{$module} = $fname;
         }
     }
 
-    my @modules = sort { $a cmp $b }
-        grep { !defined module_path($_) }
-        grep { !exists $local_modules{$_} }
-        keys %deps;
+    while ( $jobs >= $o{jobs} ) {
+        while ( my $line = <$in> ) {
+            chomp $line;
+            if ( $line eq '' ) {
+                last;
+            }
+            ++$deps{$line};
+        }
+        wait;
+        --$jobs;
+    }
 
-    return @modules;
+    my $pid = fork;
+    if ($pid) {
+        ++$jobs;
+        return;
+    }
+
+    close $in;
+
+    my %modules;
+    eval {
+        %modules = map { $_ => 1 }
+            grep { defined $_ && $_ ne 'perl' }
+            $scanner->scan_string($s)->required_modules();
+    };
+    if ($@) {
+        warn $@;
+    }
+
+    flock $out, LOCK_EX;
+    print $out join '', map { qq($_\n) } keys %modules;
+    print $out qq(\n);
+    flock $out, LOCK_UN;
+
+    close $out;
+
+    exit 0;
 }
+
+my @dirs = @ARGV;
+if ( !@dirs ) {
+    push @dirs, '.';
+}
+File::Find::find(
+    sub {
+        if ( -d && /^(CVS|\.(svn|git))$/ ) {
+            $File::Find::prune = 1;
+            return;
+        }
+        elsif ( !/\.(pl|pm|t)$/ ) {
+            return;
+        }
+        process_file($File::Find::name);
+    },
+    @dirs
+);
+
+close $out;
+
+while ($jobs) {
+    while ( my $line = <$in> ) {
+        chomp $line;
+        if ( $line eq '' ) {
+            last;
+        }
+        ++$deps{$line};
+    }
+    wait;
+    --$jobs;
+}
+
+close $in;
 
 sub file_name {
     my ($module) = @_;
@@ -80,6 +210,8 @@ sub file_name {
 
 sub apt_name {
     my ($module) = @_;
+
+    $module eq 'Tk' and return 'perl-tk';
 
     my $apt = lc $module;
     $apt =~ s(::)(-)g;
@@ -94,22 +226,27 @@ sub port_name {
     return "p5-${port}";
 }
 
-my %modules = map { $_ => { file => file_name($_), apt => apt_name($_), port => port_name($_) } }
-    get_missing_modules();
+my %modules;
+for my $module (keys %deps) {
+    exists $local_modules{$module} and next;
+    defined module_path($module) and next;
+    if (!exists $known_packages{$module}) {
+        warn "Unknown root package for package '$module'";
+        next;
+    }
+    my $root = $known_packages{$module}{root};
+    $modules{$root} = {
+        file => file_name($root),
+        apt  => apt_name($root),
+        port => port_name($root),
+    };
+}
 
 if ( !%modules ) {
     exit 0;
 }
 
-my $tk;
-for my $module (keys %modules) {
-    if ($module =~ '^Tk::' || $module eq 'Tk') {
-        $tk = 1;
-        delete $modules{$module};
-    }
-}
-
-if ($OSNAME eq 'darwin') {
+if ( $OSNAME eq 'darwin' ) {
     my %port;
 
     my $re = join '|', map {"^$_->{port}\$"} values %modules;
@@ -127,14 +264,11 @@ if ($OSNAME eq 'darwin') {
         }
     }
 
-    if ($tk) {
-        $port{'p5-tk'} = 1;
-    }
-
     my @port = sort { $a cmp $b } keys %port;
     if (@port) {
+        my $mac_ports = join ' ', @port;
         print "# MacPorts\n";
-        print 'sudo port -N install ', join( ' ', @port ), qq(\n);
+        print "sudo port -N install \n";
         print qq(\n);
     }
 }
@@ -146,7 +280,7 @@ else {
     my $cmd = "apt-cache search '$re'";
     for my $line (qx($cmd)) {
         chomp $line;
-        if ( $line =~ /^(lib\S+-perl) - / ) {
+        if ( $line =~ /^(lib\S+-perl|perl-\S+) - / ) {
             $apt{$1} = 1;
 
             while ( my ( $k, $v ) = each %modules ) {
@@ -157,39 +291,37 @@ else {
         }
     }
 
-    # using apt-file
-    my $tmp = File::Temp->new();
-    $tmp->autoflush();
-    print $tmp map {"$_->{file}\n"} values %modules;
+    # # using apt-file
+    # my $tmp = File::Temp->new();
+    # $tmp->autoflush();
+    # print $tmp map {"$_->{file}\n"} values %modules;
 
-    $cmd = 'apt-file -f search ' . $tmp->filename;
-    for my $line (qx($cmd)) {
-        chomp $line;
-        if ( $line =~ /^(lib\S+-perl|perl-\S+): / ) {
-            $apt{$1} = 1;
+    # $cmd = 'apt-file -f search ' . $tmp->filename;
+    # for my $line (qx($cmd)) {
+    #     chomp $line;
+    #     if ( $line =~ /^(lib\S+-perl|perl-\S+): / ) {
+    #         $apt{$1} = 1;
 
-            while ( my ( $k, $v ) = each %modules ) {
-                ## NB: dangerous, can match multiple packages
-                if ( $line =~ /$v->{file}$/ ) {
-                    delete $modules{$k};
-                }
-            }
-        }
-    }
-
-    if ($tk) {
-        $apt{'perl-tk'} = 1;
-    }
+    #         while ( my ( $k, $v ) = each %modules ) {
+    #             ## NB: dangerous, can match multiple packages
+    #             if ( $line =~ /$v->{file}$/ ) {
+    #                 delete $modules{$k};
+    #             }
+    #         }
+    #     }
+    # }
 
     my @apt = sort { $a cmp $b } keys %apt;
     if (@apt) {
+        my $apt_packages = join ' ', @apt;
         print "# aptitude\n";
-        print 'sudo apt-get -y install ', join( ' ', @apt ), qq(\n);
+        print "sudo apt-get -y install $apt_packages\n";
         print qq(\n);
     }
 }
 
 if (%modules) {
+    my $cpan_modules = join ' ', sort { $a cmp $b } keys %modules;
     print "# cpan\n";
-    print 'yes | cpan -i ', join( ' ', sort { $a cmp $b } keys %modules ), qq(\n);
+    print "yes | cpan -i $cpan_modules\n";
 }
