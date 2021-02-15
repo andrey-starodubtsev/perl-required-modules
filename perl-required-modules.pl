@@ -12,7 +12,7 @@
 #
 # $ sudo port selfupdate
 # $ sudo port upgrade outdated
-# $ sudo port -N install p5-module-path p5-perl-prereqscanner
+# $ sudo port -N install p5-module-path p5-perl-prereqscanner p5-ipc-system-simple p5-libwww-perl
 
 use strict;
 use warnings;
@@ -22,7 +22,6 @@ use Carp;
 use English '-no_match_vars';
 use Fcntl ':flock';
 use File::Find;
-use File::HomeDir 'home';
 use File::Spec::Functions ':ALL';
 use File::Temp;
 use Getopt::Long;
@@ -36,9 +35,9 @@ use Module::Path 'module_path';
 use Perl::PrereqScanner;
 
 my $packages = '02packages.details.txt.gz';
-my $cpan     = catfile( home(), qw(.cpan sources modules), $packages );
-my $cpanm    = catfile( home(), qw(.cpanm sources) );
-my $url      = 'https://www.cpan.org/modules/02packages.details.txt.gz';
+my $cpan     = catfile( $ENV{HOME}, qw(.cpan sources modules), $packages );
+my $cpanm    = catfile( $ENV{HOME}, qw(.cpanm sources) );
+my $url      = 'http://www.cpan.org/modules/02packages.details.txt.gz';
 
 my %o = qw(jobs 1);
 GetOptions( \%o, qw(packages-file=s jobs=i) ) or pod2usage(1);
@@ -96,11 +95,12 @@ elsif ( -e $cpanm ) {
     }
 }
 else {
-    my $f = catfile( $tmp, $packages );
-    my $code = getstore( $url, $f );
-    if ( $code < 200 || 300 <= $code ) {
-        confess "Trying to download $url, got
-        $code HTTP response code";
+    my $f = catfile( tmpdir(), $packages );
+    if ( ! -e $f ) {
+        my $code = getstore( $url, $f );
+        if ( $code < 200 || 300 <= $code ) {
+            confess "Trying to download $url, got $code HTTP response code";
+        }
     }
     load_packages_file($f);
 }
@@ -151,17 +151,18 @@ sub process_file {
     my %modules;
     eval {
         %modules = map { $_ => 1 }
-            grep { defined $_ && $_ ne 'perl' }
-            $scanner->scan_string($s)->required_modules();
+        grep { defined $_ && $_ ne 'perl' }
+        $scanner->scan_string($s)->required_modules();
     };
     if ($@) {
         warn $@;
     }
 
-    flock $out, LOCK_EX;
+    # use CORE::flock cause it fails on OSX
+    CORE::flock $out, LOCK_EX;
     print $out join '', map { qq($_\n) } keys %modules;
     print $out qq(\n);
-    flock $out, LOCK_UN;
+    CORE::flock $out, LOCK_UN;
 
     close $out;
 
@@ -268,7 +269,7 @@ if ( $OSNAME eq 'darwin' ) {
     if (@port) {
         my $mac_ports = join ' ', @port;
         print "# MacPorts\n";
-        print "sudo port -N install \n";
+        print "sudo port -N install $mac_ports\n";
         print qq(\n);
     }
 }
@@ -323,5 +324,5 @@ else {
 if (%modules) {
     my $cpan_modules = join ' ', sort { $a cmp $b } keys %modules;
     print "# cpan\n";
-    print "yes | cpan -i $cpan_modules\n";
+    print "PERL_MM_USE_DEFAULT=1 PERL_EXTUTILS_AUTOINSTALL=--defaultdeps cpan -i $cpan_modules\n";
 }
