@@ -86,13 +86,13 @@ sub load_packages_file {
 if ( $o{'packages-file'} && -e $o{'packages-file'} ) {
     load_packages_file( $o{'packages-file'} );
 }
-elsif ( -e $cpan ) {
-    load_packages_file($cpan);
-}
 elsif ( -e $cpanm ) {
     for my $f ( glob catfile( $cpanm, '*', $packages ) ) {
         load_packages_file($f);
     }
+}
+elsif ( -e $cpan ) {
+    load_packages_file($cpan);
 }
 else {
     my $f = catfile( tmpdir(), $packages );
@@ -323,6 +323,12 @@ else {
 
 if (%modules) {
     my $cpan_modules = join ' ', sort { $a cmp $b } keys %modules;
-    print "# cpan\n";
-    print "PERL_MM_USE_DEFAULT=1 PERL_EXTUTILS_AUTOINSTALL=--defaultdeps cpan -i $cpan_modules\n";
+    if (-e $cpanm) {
+        print "# cpanm\n";
+        print "cpanm $cpan_modules\n";
+    }
+    else {
+        print "# cpan\n";
+        print "PERL_MM_USE_DEFAULT=1 PERL_EXTUTILS_AUTOINSTALL=--defaultdeps cpan -i $cpan_modules\n";
+    }
 }
