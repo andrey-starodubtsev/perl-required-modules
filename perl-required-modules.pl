@@ -174,15 +174,18 @@ if ( !@dirs ) {
     push @dirs, '.';
 }
 File::Find::find(
-    sub {
-        if ( -d && /^(CVS|\.(svn|git))$/ ) {
-            $File::Find::prune = 1;
-            return;
-        }
-        elsif ( !/\.(pl|pm|t)$/ ) {
-            return;
-        }
-        process_file($File::Find::name);
+    {
+        wanted => sub {
+            if ( -d && /^(CVS|\.(svn|git))$/ ) {
+                $File::Find::prune = 1;
+                return;
+            }
+            elsif ( !/\.(pl|pm|t)$/ ) {
+                return;
+            }
+            process_file($File::Find::name);
+        },
+        no_chdir => 1,
     },
     @dirs
 );
