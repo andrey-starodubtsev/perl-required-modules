@@ -111,7 +111,7 @@ my $scanner = Perl::PrereqScanner->new();
 local $OUTPUT_AUTOFLUSH = 1;
 pipe my $in, my $out;
 my $jobs = 0;
-setpgrp;
+$OSNAME eq 'MSWin32' || setpgrp;
 
 sub process_file {
     my ($fname) = @_;
@@ -180,7 +180,7 @@ File::Find::find(
                 $File::Find::prune = 1;
                 return;
             }
-            elsif ( !/\.(pl|pm|t)$/ ) {
+            elsif ( !/\.(pl|pm|t)$/ || -d ) {
                 return;
             }
             process_file($File::Find::name);
@@ -276,7 +276,7 @@ if ( $OSNAME eq 'darwin' ) {
         print qq(\n);
     }
 }
-else {
+elsif ( $OSNAME eq 'linux' ) {
     my %apt;
 
     # using apt-cache
